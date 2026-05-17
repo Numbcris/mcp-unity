@@ -11,8 +11,18 @@ using Newtonsoft.Json.Linq;
 namespace McpUnity.Utils
 {
     /// <summary>
-    /// Utility class for MCP configuration operations
+    /// Controls how the path to Server~/build/index.js is rendered in generated MCP configs.
     /// </summary>
+    public enum PathMode
+    {
+        /// <summary>Absolute filesystem path. Required for per-user/global configs (Cursor, Windsurf, etc.).</summary>
+        Absolute,
+        /// <summary>Path relative to the Unity project root. Used for OpenCode's opencode.json.</summary>
+        ProjectRelative,
+        /// <summary>Project-relative path prefixed with ${workspaceFolder}/. Used for VS Code / GitHub Copilot's .vscode/mcp.json.</summary>
+        VSCodeWorkspaceFolder
+    }
+
     /// <summary>
     /// Utility class for MCP configuration and system operations
     /// </summary>
@@ -25,7 +35,7 @@ namespace McpUnity.Utils
         /// <summary>
         /// Generates the MCP configuration JSON to setup the Unity MCP server in different AI Clients
         /// </summary>
-        public static string GenerateMcpConfigJson(bool useTabsIndentation)
+        public static string GenerateMcpConfigJson(bool useTabsIndentation, PathMode pathMode = PathMode.Absolute)
         {
             var config = new Dictionary<string, object>
             {
@@ -34,7 +44,7 @@ namespace McpUnity.Utils
                         { "mcp-unity", new Dictionary<string, object>
                             {
                                 { "command", "node" },
-                                { "args", new[] { Path.Combine(GetServerPath(), "build", "index.js") } }
+                                { "args", new[] { GetIndexJsPath(pathMode) } }
                             }
                         }
                     }
@@ -72,9 +82,9 @@ namespace McpUnity.Utils
         /// OpenCode uses a different schema than the standard `mcpServers` shape:
         ///   { "$schema": ..., "mcp": { "mcp-unity": { "type": "local", "enabled": true, "command": [...], "environment": {} } } }
         /// </summary>
-        public static string GenerateOpenCodeConfigJson(bool useTabsIndentation)
+        public static string GenerateOpenCodeConfigJson(bool useTabsIndentation, PathMode pathMode = PathMode.Absolute)
         {
-            string indexJsPath = Path.Combine(GetServerPath(), "build", "index.js");
+            string indexJsPath = GetIndexJsPath(pathMode);
 
             var config = new Dictionary<string, object>
             {
@@ -120,15 +130,39 @@ namespace McpUnity.Utils
         /// Generates the MCP configuration TOML to setup the Unity MCP server in TOML-based AI Clients (e.g., Codex CLI)
         /// </summary>
         /// <returns>The TOML configuration string for mcp-unity server</returns>
-        public static string GenerateMcpConfigToml()
+        public static string GenerateMcpConfigToml(PathMode pathMode = PathMode.Absolute)
         {
-            string indexJsPath = Path.Combine(GetServerPath(), "build", "index.js").Replace("\\", "/");
-            
+            string indexJsPath = GetIndexJsPath(pathMode);
+
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("[mcp_servers.mcp-unity]");
             sb.AppendLine("command = \"node\"");
             sb.AppendLine($"args = [\"{indexJsPath}\"]");
             return sb.ToString();
+        }
+
+        /// <summary>
+        /// Returns the path to Server~/build/index.js rendered according to the given <see cref="PathMode"/>.
+        /// All returned paths use forward slashes.
+        /// </summary>
+        private static string GetIndexJsPath(PathMode mode)
+        {
+            string absoluteIndexJs = Path.Combine(GetServerPath(), "build", "index.js").Replace("\\", "/");
+
+            if (mode == PathMode.Absolute)
+            {
+                return absoluteIndexJs;
+            }
+
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName.Replace("\\", "/");
+            string relativeIndexJs = Path.GetRelativePath(projectRoot, absoluteIndexJs).Replace("\\", "/");
+
+            if (mode == PathMode.VSCodeWorkspaceFolder)
+            {
+                return "${workspaceFolder}/" + relativeIndexJs;
+            }
+
+            return relativeIndexJs;
         }
 
         /// <summary>
@@ -271,12 +305,13 @@ namespace McpUnity.Utils
         }
 
         /// <summary>
-        /// Adds the MCP configuration to the GitHub Copilot config file
+        /// Adds the MCP configuration to the GitHub Copilot config file.
+        /// Uses ${workspaceFolder}-prefixed path so the config is portable across machines when committed to git.
         /// </summary>
         public static bool AddToGitHubCopilotConfig(bool useTabsIndentation)
         {
             string configFilePath = GetGitHubCopilotConfigPath();
-            return AddToConfigFile(configFilePath, useTabsIndentation, "GitHub Copilot");
+            return AddToConfigFile(configFilePath, useTabsIndentation, "GitHub Copilot", PathMode.VSCodeWorkspaceFolder);
         }
 
         /// <summary>
@@ -291,11 +326,12 @@ namespace McpUnity.Utils
         /// <summary>
         /// Adds the MCP configuration to the OpenCode config file (opencode.json in project root).
         /// OpenCode uses a custom JSON schema, so this does not reuse the standard mcpServers helpers.
+        /// Uses a project-relative path so the config is portable across machines when committed to git.
         /// </summary>
         public static bool AddToOpenCodeConfig(bool useTabsIndentation)
         {
             string configFilePath = GetOpenCodeConfigPath();
-            return AddToOpenCodeConfigFile(configFilePath, useTabsIndentation);
+            return AddToOpenCodeConfigFile(configFilePath, useTabsIndentation, PathMode.ProjectRelative);
         }
 
         /// <summary>
@@ -347,17 +383,18 @@ namespace McpUnity.Utils
         /// <param name="configFilePath">Path to the config file</param>
         /// <param name="useTabsIndentation">Whether to use tabs for indentation</param>
         /// <param name="productName">Name of the product (for error messages)</param>
+        /// <param name="pathMode">How to render the path to Server~/build/index.js</param>
         /// <returns>True if successfuly added the config, false otherwise</returns>
-        private static bool AddToConfigFile(string configFilePath, bool useTabsIndentation, string productName)
+        private static bool AddToConfigFile(string configFilePath, bool useTabsIndentation, string productName, PathMode pathMode = PathMode.Absolute)
         {
             if (string.IsNullOrEmpty(configFilePath))
             {
                 Debug.LogError($"{productName} config file not found. Please make sure {productName} is installed.");
                 return false;
             }
-                
+
             // Generate fresh MCP config JSON
-            string mcpConfigJson = GenerateMcpConfigJson(useTabsIndentation);
+            string mcpConfigJson = GenerateMcpConfigJson(useTabsIndentation, pathMode);
             
             try
             {
@@ -556,7 +593,7 @@ namespace McpUnity.Utils
         /// Adds the MCP configuration to the OpenCode config file. Preserves existing
         /// `$schema` and any unrelated entries under `mcp`, only upserting `mcp["mcp-unity"]`.
         /// </summary>
-        private static bool AddToOpenCodeConfigFile(string configFilePath, bool useTabsIndentation)
+        private static bool AddToOpenCodeConfigFile(string configFilePath, bool useTabsIndentation, PathMode pathMode = PathMode.Absolute)
         {
             const string productName = "OpenCode";
 
@@ -568,7 +605,7 @@ namespace McpUnity.Utils
 
             try
             {
-                string mcpConfigJson = GenerateOpenCodeConfigJson(useTabsIndentation);
+                string mcpConfigJson = GenerateOpenCodeConfigJson(useTabsIndentation, pathMode);
                 JObject mcpConfig = JObject.Parse(mcpConfigJson);
                 JToken newServerEntry = mcpConfig["mcp"]?["mcp-unity"];
 

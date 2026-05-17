@@ -253,6 +253,8 @@ Installing this MCP Unity Server is a multi-step process:
 Open the MCP configuration file of your AI client and add the MCP Unity server configuration:
 
 > Replace `ABSOLUTE/PATH/TO` with the absolute path to your MCP Unity installation or just copy the text from the Unity Editor MCP Server window (Tools > MCP Unity > Server Window).
+>
+> For configs that live inside the Unity project tree and get committed to git (e.g. `<project>/.vscode/mcp.json`, `<project>/opencode.json`), prefer a project-relative path so the same file works across machines. Toggle **"Use relative path"** in the Server Window to switch the copy-paste snippet between absolute and project-relative forms. The **Configure GitHub Copilot** and **Configure OpenCode** buttons already emit relative paths automatically.
 
 **For JSON-based clients** (Cursor, Windsurf, Claude Code, GitHub Copilot, etc.):
 
@@ -263,6 +265,21 @@ Open the MCP configuration file of your AI client and add the MCP Unity server c
           "command": "node",
           "args": [
              "ABSOLUTE/PATH/TO/mcp-unity/Server~/build/index.js"
+          ]
+       }
+   }
+}
+```
+
+For workspace-scoped VS Code / GitHub Copilot (`.vscode/mcp.json`), use `${workspaceFolder}` so the path is portable across machines:
+
+```json
+{
+   "mcpServers": {
+       "mcp-unity": {
+          "command": "node",
+          "args": [
+             "${workspaceFolder}/Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"
           ]
        }
    }
@@ -286,12 +303,14 @@ args = ["ABSOLUTE/PATH/TO/mcp-unity/Server~/build/index.js"]
     "mcp-unity": {
       "type": "local",
       "enabled": true,
-      "command": ["node", "ABSOLUTE/PATH/TO/mcp-unity/Server~/build/index.js"],
+      "command": ["node", "Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"],
       "environment": {}
     }
   }
 }
 ```
+
+> Note: the `@<hash>` segment in the UPM package cache path changes when the package is updated. If you update MCP Unity, re-run the **Configure** button (or update the path manually) so the snippet points at the new cache directory.
 
 </details>
 

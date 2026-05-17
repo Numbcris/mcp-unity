@@ -22,6 +22,7 @@ namespace McpUnity.Unity
         private bool _isInitialized = false;
         private string _mcpConfigJson = "";
         private bool _tabsIndentationJson = false;
+        private bool _useRelativePathJson = false;
         private Vector2 _helpTabScrollPosition = Vector2.zero;
         private Vector2 _serverTabScrollPosition = Vector2.zero;
 
@@ -238,12 +239,19 @@ namespace McpUnity.Unity
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("MCP Configuration", EditorStyles.boldLabel);
 
-            var before = _tabsIndentationJson;
+            var beforeTabs = _tabsIndentationJson;
+            var beforeRelative = _useRelativePathJson;
             _tabsIndentationJson = EditorGUILayout.Toggle("Use Tabs indentation", _tabsIndentationJson);
-            
-            if (string.IsNullOrEmpty(_mcpConfigJson) || before != _tabsIndentationJson)
+            _useRelativePathJson = EditorGUILayout.Toggle(
+                new GUIContent(
+                    "Use relative path",
+                    "Emit a path relative to the Unity project root. Use this when pasting into workspace-scoped configs (e.g. .vscode/mcp.json) that are shared via git."),
+                _useRelativePathJson);
+
+            if (string.IsNullOrEmpty(_mcpConfigJson) || beforeTabs != _tabsIndentationJson || beforeRelative != _useRelativePathJson)
             {
-                _mcpConfigJson = McpUtils.GenerateMcpConfigJson(_tabsIndentationJson);
+                var pathMode = _useRelativePathJson ? PathMode.ProjectRelative : PathMode.Absolute;
+                _mcpConfigJson = McpUtils.GenerateMcpConfigJson(_tabsIndentationJson, pathMode);
             }
                 
             if (GUILayout.Button("Copy to Clipboard", GUILayout.Height(30)))
