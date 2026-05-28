@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEditor;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using WebSocketSharp;
@@ -51,21 +52,39 @@ namespace McpUnity.Unity
         }
         
         /// <summary>
-        /// Handle incoming messages from WebSocket clients
+        /// Handle incoming messages from WebSocket clients.
+        /// WebSocketSharp invokes this on a background thread; we marshal the entire
+        /// message-handling body onto Unity's main thread via EditorApplication.delayCall
+        /// before touching any Editor APIs.
+        ///
+        /// Why this matters: accessing EditorStyles or scheduling EditorCoroutines from
+        /// a background thread can NRE inside PropertyEditor+Styles..cctor, which under
+        /// CLR rules permanently bricks that type for the rest of the AppDomain and
+        /// turns the Inspector black until Unity is restarted.
         /// </summary>
-        protected override async void OnMessage(MessageEventArgs e)
+        protected override void OnMessage(MessageEventArgs e)
+        {
+            string data = e.Data;
+            EditorApplication.delayCall += () => HandleMessageAsync(data);
+        }
+
+        /// <summary>
+        /// Process a WebSocket message on the Unity main thread.
+        /// Safe to call EditorCoroutineUtility, Selection, and other Editor APIs from here.
+        /// </summary>
+        private async void HandleMessageAsync(string data)
         {
             try
             {
-                McpLogger.LogInfo($"WebSocket message received: {e.Data}");
+                McpLogger.LogInfo($"WebSocket message received: {data}");
                 JObject requestJson;
                 try
                 {
-                    requestJson = JObject.Parse(e.Data);
+                    requestJson = JObject.Parse(data);
                 }
                 catch (JsonReaderException jre)
                 {
-                    McpLogger.LogError($"Invalid JSON received: {jre.Message}. Data: {e.Data}");
+                    McpLogger.LogError($"Invalid JSON received: {jre.Message}. Data: {data}");
                     // Attempt to send a parse error response. No requestId is available yet.
                     Send(CreateResponse(null, CreateErrorResponse($"Invalid JSON format: {jre.Message}", "invalid_json")).ToString(Formatting.None));
                     return;
@@ -76,7 +95,7 @@ namespace McpUnity.Unity
                 var requestId = requestJson["id"]?.ToString();
                 // We need to dispatch to Unity's main thread and wait for completion
                 var tcs = new TaskCompletionSource<JObject>();
-                
+
                 if (string.IsNullOrEmpty(method))
                 {
                     tcs.SetResult(CreateErrorResponse("Missing method in request", "invalid_request"));
@@ -93,20 +112,20 @@ namespace McpUnity.Unity
                 {
                     tcs.SetResult(CreateErrorResponse($"Unknown method: {method}", "unknown_method"));
                 }
-                
+
                 JObject responseJson = await tcs.Task;
                 JObject jsonRpcResponse = CreateResponse(requestId, responseJson);
                 string responseStr = jsonRpcResponse.ToString(Formatting.None);
-                
+
                 McpLogger.LogInfo($"WebSocket message response for request ID '{requestId}': {responseStr}");
-                
+
                 // Send the response back to the client
                 Send(responseStr);
             }
             catch (Exception ex)
             {
                 McpLogger.LogError($"Error processing message: {ex.Message}");
-                
+
                 Send(CreateErrorResponse($"Internal server error: {ex.Message}", "internal_error").ToString(Formatting.None));
             }
         }
