@@ -39,28 +39,29 @@ namespace McpUnity.Unity
         private readonly Dictionary<string, McpToolBase> _tools = new Dictionary<string, McpToolBase>();
         private readonly Dictionary<string, McpResourceBase> _resources = new Dictionary<string, McpResourceBase>();
 
+        private const int DelayedStartMaxAttempts = 3;
+        private const double DelayedStartDelaySeconds = 0.1;
+
         private WebSocketServer _webSocketServer;
         private CancellationTokenSource _cts;
         private TestRunnerService _testRunnerService;
         private ConsoleLogsService _consoleLogsService;
-        
-        /// <summary>
-        /// Called after every domain reload
-        /// </summary>
-        [DidReloadScripts]
-        private static void AfterReload()
+        private bool _delayedStartScheduled;
+        private bool _delayedStartRequiresAutoStart;
+        private int _delayedStartAttempt;
+        private double _delayedStartEarliestTime;
+        private int _connectionGeneration;
+        private int _activeConnectionGeneration;
+
+        private enum StartServerResult
         {
-            // Skip initialization in batch mode (Unity Cloud Build, CI, headless builds)
-            // This prevents npm commands from hanging the build process
-            if (Application.isBatchMode)
-            {
-                return;
-            }
-            
-            // Ensure Instance is created and hooks are set up after initial domain load
-            var currentInstance = Instance;
+            Started,
+            AlreadyListening,
+            Skipped,
+            AddressAlreadyInUse,
+            Failed
         }
-        
+
         /// <summary>
         /// Singleton instance accessor. Returns null in batch mode.
         /// </summary>
@@ -95,43 +96,6 @@ namespace McpUnity.Unity
         public ConcurrentDictionary<string, string> Clients { get; } = new ConcurrentDictionary<string, string>();
 
         /// <summary>
-        /// Private constructor to enforce singleton pattern
-        /// </summary>
-        private McpUnityServer()
-        {
-            // Skip all initialization in batch mode (Unity Cloud Build, CI, headless builds)
-            // The npm install/build commands can hang indefinitely without node.js available
-            if (Application.isBatchMode)
-            {
-                McpLogger.LogInfo("MCP Unity server disabled: Running in batch mode (Unity Cloud Build or CI)");
-                return;
-            }
-            
-            EditorApplication.quitting -= OnEditorQuitting; // Prevent multiple subscriptions on domain reload
-            EditorApplication.quitting += OnEditorQuitting;
-
-            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
-            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
-
-            AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
-            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
-
-            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
-            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
-
-            InstallServer();
-            InitializeServices();
-            RegisterResources();
-            RegisterTools();
-
-            // Initial start if auto-start is enabled and not recovering from a reload where it was off
-            if (McpUnitySettings.Instance.AutoStartServer)
-            {
-                 StartServer();
-            }
-        }
-
-        /// <summary>
         /// Disposes the McpUnityServer instance, stopping the WebSocket server and unsubscribing from Unity Editor events.
         /// This method ensures proper cleanup of resources and prevents memory leaks or unexpected behavior during domain reloads or editor shutdown.
         /// </summary>
@@ -146,44 +110,25 @@ namespace McpUnity.Unity
 
             GC.SuppressFinalize(this);
         }
-        
+
         /// <summary>
         /// Start the WebSocket Server to communicate with Node.js
         /// </summary>
         public void StartServer()
         {
-            // Skip starting server if this is a Multiplayer Play Mode clone instance
-            // Only the main editor should run the WebSocket server to avoid port conflicts
-            if (McpUtils.IsMultiplayerPlayModeClone())
-            {
-                McpLogger.LogInfo("Server startup skipped: Running as Multiplayer Play Mode clone instance. Only the main editor runs the MCP server.");
-                return;
-            }
-
-            if (IsListening)
-            {
-                McpLogger.LogInfo($"Server start requested, but already listening on port {McpUnitySettings.Instance.Port}.");
-                return;
-            }
-
-            try
-            {
-                var host = McpUnitySettings.Instance.AllowRemoteConnections ? "0.0.0.0" : "localhost";
-                _webSocketServer = new WebSocketServer($"ws://{host}:{McpUnitySettings.Instance.Port}");
-                _webSocketServer.AddWebSocketService("/McpUnity", () => new McpUnitySocketHandler(this));
-                _webSocketServer.Start();
-                McpLogger.LogInfo($"WebSocket server started successfully on {host}:{McpUnitySettings.Instance.Port}.");
-            }
-            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
-            {
-                McpLogger.LogError($"Failed to start WebSocket server: Port {McpUnitySettings.Instance.Port} is already in use. {ex.Message}");
-            }
-            catch (Exception ex)
-            {
-                McpLogger.LogError($"Failed to start WebSocket server: {ex.Message}\n{ex.StackTrace}");
-            }
+            CancelScheduledStart();
+            StartServerInternal(logAddressInUseAsError: true);
         }
-        
+
+        /// <summary>
+        /// Stop the current server and start it again after Unity has had a chance to release the socket.
+        /// </summary>
+        public void RestartServer()
+        {
+            StopServer();
+            ScheduleStartServer(requireAutoStart: false, reason: "manual restart");
+        }
+
         /// <summary>
         /// Stop the WebSocket server
         /// </summary>
@@ -191,8 +136,12 @@ namespace McpUnity.Unity
         /// <param name="closeReason">Optional reason message for the close</param>
         public void StopServer(ushort? closeCode = null, string closeReason = null)
         {
-            if (!IsListening)
+            CancelScheduledStart();
+            _activeConnectionGeneration = 0;
+
+            if (_webSocketServer == null)
             {
+                Clients.Clear();
                 return;
             }
 
@@ -221,45 +170,13 @@ namespace McpUnity.Unity
         }
 
         /// <summary>
-        /// Close all connected clients with a specific close code
-        /// </summary>
-        /// <param name="closeCode">WebSocket close code (4000-4999 for application use)</param>
-        /// <param name="reason">Reason message for the close</param>
-        private void CloseAllClients(ushort closeCode, string reason)
-        {
-            if (_webSocketServer == null)
-            {
-                return;
-            }
-
-            try
-            {
-                var service = _webSocketServer.WebSocketServices["/McpUnity"];
-                if (service?.Sessions != null)
-                {
-                    // Get all active session IDs and close each with the custom code
-                    var sessionIds = new List<string>(service.Sessions.IDs);
-                    foreach (var sessionId in sessionIds)
-                    {
-                        service.Sessions.CloseSession(sessionId, closeCode, reason);
-                    }
-                    McpLogger.LogInfo($"Closed {sessionIds.Count} client connection(s) with code {closeCode}: {reason}");
-                }
-            }
-            catch (Exception ex)
-            {
-                McpLogger.LogError($"Error closing client connections: {ex.Message}");
-            }
-        }
-        
-        /// <summary>
         /// Try to get a tool by name
         /// </summary>
         public bool TryGetTool(string name, out McpToolBase tool)
         {
             return _tools.TryGetValue(name, out tool);
         }
-        
+
         /// <summary>
         /// Try to get a resource by name
         /// </summary>
@@ -301,6 +218,267 @@ namespace McpUnity.Unity
                 McpUtils.RunNpmCommand("run build", serverPath);
             }
         }
+
+        internal bool ShouldTrackClient(int connectionGeneration)
+        {
+            return connectionGeneration == _activeConnectionGeneration && IsListening;
+        }
+
+        /// <summary>
+        /// Private constructor to enforce singleton pattern
+        /// </summary>
+        private McpUnityServer()
+        {
+            // Skip all initialization in batch mode (Unity Cloud Build, CI, headless builds)
+            // The npm install/build commands can hang indefinitely without node.js available
+            if (Application.isBatchMode)
+            {
+                McpLogger.LogInfo("MCP Unity server disabled: Running in batch mode (Unity Cloud Build or CI)");
+                return;
+            }
+
+            EditorApplication.quitting -= OnEditorQuitting; // Prevent multiple subscriptions on domain reload
+            EditorApplication.quitting += OnEditorQuitting;
+
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
+
+            AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
+            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
+
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+
+            InstallServer();
+            InitializeServices();
+            RegisterResources();
+            RegisterTools();
+
+            // Initial start if auto-start is enabled and not recovering from a reload where it was off
+            if (McpUnitySettings.Instance.AutoStartServer)
+            {
+                ScheduleStartServer(requireAutoStart: true, reason: "auto-start");
+            }
+        }
+
+        private StartServerResult StartServerInternal(bool logAddressInUseAsError)
+        {
+            // Skip starting server if this is a Multiplayer Play Mode clone instance
+            // Only the main editor should run the WebSocket server to avoid port conflicts
+            if (McpUtils.IsMultiplayerPlayModeClone())
+            {
+                McpLogger.LogInfo("Server startup skipped: Running as Multiplayer Play Mode clone instance. Only the main editor runs the MCP server.");
+                return StartServerResult.Skipped;
+            }
+
+            if (IsListening)
+            {
+                McpLogger.LogInfo($"Server start requested, but already listening on port {McpUnitySettings.Instance.Port}.");
+                return StartServerResult.AlreadyListening;
+            }
+
+            if (_webSocketServer != null)
+            {
+                StopServer();
+            }
+
+            WebSocketServer webSocketServer = null;
+            try
+            {
+                int connectionGeneration = Interlocked.Increment(ref _connectionGeneration);
+                var host = McpUnitySettings.Instance.AllowRemoteConnections ? "0.0.0.0" : "localhost";
+                webSocketServer = new WebSocketServer($"ws://{host}:{McpUnitySettings.Instance.Port}");
+                webSocketServer.AddWebSocketService("/McpUnity", () => new McpUnitySocketHandler(this, connectionGeneration));
+                webSocketServer.Start();
+                _webSocketServer = webSocketServer;
+                _activeConnectionGeneration = connectionGeneration;
+                McpLogger.LogInfo($"WebSocket server started successfully on {host}:{McpUnitySettings.Instance.Port}.");
+                return StartServerResult.Started;
+            }
+            catch (SocketException ex) when (ex.SocketErrorCode == SocketError.AddressAlreadyInUse)
+            {
+                CleanupFailedStart(webSocketServer);
+                string message = $"Failed to start WebSocket server: Port {McpUnitySettings.Instance.Port} is already in use. {ex.Message}";
+                if (logAddressInUseAsError)
+                {
+                    McpLogger.LogError(message);
+                }
+                else
+                {
+                    McpLogger.LogWarning($"{message} Retrying shortly.");
+                }
+
+                return StartServerResult.AddressAlreadyInUse;
+            }
+            catch (Exception ex)
+            {
+                CleanupFailedStart(webSocketServer);
+                McpLogger.LogError($"Failed to start WebSocket server: {ex.Message}\n{ex.StackTrace}");
+                return StartServerResult.Failed;
+            }
+        }
+
+        private void ScheduleStartServer(bool requireAutoStart, string reason, int attempt = 1)
+        {
+            if (_delayedStartScheduled)
+            {
+                _delayedStartRequiresAutoStart = _delayedStartRequiresAutoStart && requireAutoStart;
+                return;
+            }
+
+            _delayedStartScheduled = true;
+            _delayedStartRequiresAutoStart = requireAutoStart;
+            _delayedStartAttempt = Math.Min(Math.Max(attempt, 1), DelayedStartMaxAttempts);
+            _delayedStartEarliestTime = EditorApplication.timeSinceStartup + DelayedStartDelaySeconds;
+            McpLogger.LogInfo($"WebSocket server start scheduled after delay ({reason}).");
+            EditorApplication.delayCall += StartServerAfterDelay;
+            EditorApplication.update += StartServerAfterDelayOnUpdate;
+        }
+
+        private void CancelScheduledStart()
+        {
+            if (!_delayedStartScheduled)
+            {
+                return;
+            }
+
+            EditorApplication.delayCall -= StartServerAfterDelay;
+            EditorApplication.update -= StartServerAfterDelayOnUpdate;
+            _delayedStartScheduled = false;
+            _delayedStartRequiresAutoStart = false;
+            _delayedStartAttempt = 0;
+            _delayedStartEarliestTime = 0;
+        }
+
+        private void StartServerAfterDelay()
+        {
+            if (!_delayedStartScheduled)
+            {
+                return;
+            }
+
+            if (EditorApplication.timeSinceStartup < _delayedStartEarliestTime)
+            {
+                EditorApplication.delayCall += StartServerAfterDelay;
+                return;
+            }
+
+            RunScheduledStart();
+        }
+
+        private void StartServerAfterDelayOnUpdate()
+        {
+            if (!_delayedStartScheduled)
+            {
+                EditorApplication.update -= StartServerAfterDelayOnUpdate;
+                return;
+            }
+
+            if (EditorApplication.timeSinceStartup < _delayedStartEarliestTime)
+            {
+                return;
+            }
+
+            RunScheduledStart();
+        }
+
+        private void RunScheduledStart()
+        {
+            _delayedStartScheduled = false;
+            EditorApplication.delayCall -= StartServerAfterDelay;
+            EditorApplication.update -= StartServerAfterDelayOnUpdate;
+
+            bool requireAutoStart = _delayedStartRequiresAutoStart;
+            int attempt = Math.Min(Math.Max(_delayedStartAttempt, 1), DelayedStartMaxAttempts);
+            _delayedStartRequiresAutoStart = false;
+            _delayedStartAttempt = 0;
+            _delayedStartEarliestTime = 0;
+
+            if (Application.isBatchMode || _instance != this)
+            {
+                return;
+            }
+
+            if (requireAutoStart && !McpUnitySettings.Instance.AutoStartServer)
+            {
+                McpLogger.LogInfo("Scheduled WebSocket server start skipped because auto-start is disabled.");
+                return;
+            }
+
+            if (IsListening)
+            {
+                return;
+            }
+
+            bool isFinalAttempt = attempt >= DelayedStartMaxAttempts;
+            StartServerResult result = StartServerInternal(logAddressInUseAsError: isFinalAttempt);
+            if (result == StartServerResult.AddressAlreadyInUse && !isFinalAttempt)
+            {
+                ScheduleStartServer(requireAutoStart, "port still in use", attempt + 1);
+            }
+        }
+
+        private void CleanupFailedStart(WebSocketServer webSocketServer)
+        {
+            if (webSocketServer == null)
+            {
+                Clients.Clear();
+                return;
+            }
+
+            try
+            {
+                if (webSocketServer.IsListening)
+                {
+                    webSocketServer.Stop();
+                }
+            }
+            catch (Exception ex)
+            {
+                McpLogger.LogWarning($"Error cleaning up failed WebSocket server start: {ex.Message}");
+            }
+            finally
+            {
+                if (ReferenceEquals(_webSocketServer, webSocketServer))
+                {
+                    _webSocketServer = null;
+                }
+
+                Clients.Clear();
+            }
+        }
+
+        /// <summary>
+        /// Close all connected clients with a specific close code
+        /// </summary>
+        /// <param name="closeCode">WebSocket close code (4000-4999 for application use)</param>
+        /// <param name="reason">Reason message for the close</param>
+        private void CloseAllClients(ushort closeCode, string reason)
+        {
+            if (_webSocketServer == null)
+            {
+                return;
+            }
+
+            try
+            {
+                var service = _webSocketServer.WebSocketServices["/McpUnity"];
+                if (service?.Sessions != null)
+                {
+                    // Get all active session IDs and close each with the custom code
+                    var sessionIds = new List<string>(service.Sessions.IDs);
+                    foreach (var sessionId in sessionIds)
+                    {
+                        service.Sessions.CloseSession(sessionId, closeCode, reason);
+                    }
+                    McpLogger.LogInfo($"Closed {sessionIds.Count} client connection(s) with code {closeCode}: {reason}");
+                }
+            }
+            catch (Exception ex)
+            {
+                McpLogger.LogError($"Error closing client connections: {ex.Message}");
+            }
+        }
         
         /// <summary>
         /// Register all available tools
@@ -310,7 +488,7 @@ namespace McpUnity.Unity
             // Register MenuItemTool
             MenuItemTool menuItemTool = new MenuItemTool();
             _tools.Add(menuItemTool.Name, menuItemTool);
-            
+
             // Register SelectGameObjectTool
             SelectGameObjectTool selectGameObjectTool = new SelectGameObjectTool();
             _tools.Add(selectGameObjectTool.Name, selectGameObjectTool);
@@ -465,6 +643,23 @@ namespace McpUnity.Unity
         }
 
         /// <summary>
+        /// Called after every domain reload
+        /// </summary>
+        [DidReloadScripts]
+        private static void AfterReload()
+        {
+            // Skip initialization in batch mode (Unity Cloud Build, CI, headless builds)
+            // This prevents npm commands from hanging the build process
+            if (Application.isBatchMode)
+            {
+                return;
+            }
+
+            // Ensure Instance is created and hooks are set up after initial domain load
+            var currentInstance = Instance;
+        }
+
+        /// <summary>
         /// Handles the Unity Editor quitting event. Ensures the server is properly stopped and disposed.
         /// </summary>
         private static void OnEditorQuitting()
@@ -483,10 +678,7 @@ namespace McpUnity.Unity
         {
             if (Application.isBatchMode || _instance == null) return;
             
-            if (_instance.IsListening)
-            {
-                _instance.StopServer();
-            }
+            _instance.StopServer();
         }
 
         /// <summary>
@@ -500,7 +692,7 @@ namespace McpUnity.Unity
             
             if (McpUnitySettings.Instance.AutoStartServer && !_instance.IsListening)
             {
-                _instance.StartServer();
+                _instance.ScheduleStartServer(requireAutoStart: true, reason: "assembly reload");
             }
         }
 
@@ -530,7 +722,7 @@ namespace McpUnity.Unity
                     // Returned to Edit Mode
                     if (!_instance.IsListening && McpUnitySettings.Instance.AutoStartServer)
                     {
-                        _instance.StartServer();
+                        _instance.ScheduleStartServer(requireAutoStart: true, reason: "entered edit mode");
                     }
                     break;
             }

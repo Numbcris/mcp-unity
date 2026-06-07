@@ -102,8 +102,7 @@ namespace McpUnity.Unity
             {
                 settings.Port = newPort;
                 settings.SaveSettings();
-                mcpUnityServer.StopServer();
-                mcpUnityServer.StartServer(); // Restart the server.newPort
+                mcpUnityServer.RestartServer();
             }
             EditorGUILayout.EndHorizontal();
             
@@ -144,8 +143,7 @@ namespace McpUnity.Unity
                 settings.AllowRemoteConnections = allowRemoteConnections;
                 settings.SaveSettings();
                 // Restart server to apply binding change
-                mcpUnityServer.StopServer();
-                mcpUnityServer.StartServer();
+                mcpUnityServer.RestartServer();
             }
             
             EditorGUILayout.Space();
@@ -175,6 +173,12 @@ namespace McpUnity.Unity
             if (GUILayout.Button("Stop Server", GUILayout.Height(30)))
             {
                 mcpUnityServer.StopServer();
+            }
+
+            GUI.enabled = true;
+            if (GUILayout.Button("Restart Server", GUILayout.Height(30)))
+            {
+                mcpUnityServer.RestartServer();
             }
             
             //Repaint();
