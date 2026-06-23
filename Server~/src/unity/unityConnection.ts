@@ -216,8 +216,7 @@ export class UnityConnection extends EventEmitter {
       const options: WebSocket.ClientOptions = {
         headers: {
           'X-Client-Name': this.config.clientName || ''
-        },
-        origin: this.config.clientName || ''
+        }
       };
 
       // Clean up existing socket first
