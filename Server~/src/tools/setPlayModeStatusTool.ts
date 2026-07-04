@@ -59,6 +59,11 @@ async function toolHandler(mcpUnity: McpUnity, params: any): Promise<CallToolRes
         text: `Play mode action '${validatedParams.action}' executed successfully. Current state: ${statusText}`
       }
     ],
+    data: {
+      action: validatedParams.action,
+      isPlaying: response.isPlaying,
+      isPaused: response.isPaused
+    },
     isError: false
   };
 }

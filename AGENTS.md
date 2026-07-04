@@ -160,7 +160,7 @@ Node reads config from `../ProjectSettings/McpUnitySettings.json` relative to **
 - `unity://packages` — Installed and available packages
 - `unity://assets` — Asset database information
 - `unity://tests/{testMode}` — Test Runner test information
-- `unity://ui/dashboard` — Unity dashboard MCP App UI
+- `ui://unity-dashboard` — Unity dashboard MCP App UI
 
 ### Available prompts (current)
 - `unity_dashboard` — Opens Unity dashboard MCP app with guided information about features

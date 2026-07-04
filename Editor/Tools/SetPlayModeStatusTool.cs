@@ -21,7 +21,7 @@ namespace McpUnity.Tools
         {
             try
             {
-                string action = parameters["action"]?.ToString()?.ToLower();
+                string action = parameters?["action"]?.ToString()?.ToLowerInvariant();
                 
                 if (string.IsNullOrEmpty(action))
                 {
