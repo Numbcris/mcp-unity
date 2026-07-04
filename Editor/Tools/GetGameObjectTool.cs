@@ -16,13 +16,15 @@ namespace McpUnity.Tools
         public GetGameObjectTool()
         {
             Name = "get_gameobject";
-            Description = "Retrieves detailed information about a specific GameObject by instance ID, name, or hierarchical path (e.g., \"Parent/Child/MyObject\"). Returns all component properties including Transform position, rotation, scale, and more.";
+            Description = "Retrieves detailed information about a specific GameObject by instance ID, name, or hierarchical path (e.g., \"Parent/Child/MyObject\"). Returns component properties (Transform position/rotation/scale, etc.) plus a scoped hierarchy of children. Use optional 'maxDepth' (default 2), 'includeComponents', and 'includeComponentProperties' to control response size; when limits are hit, nodes carry a '_truncated' marker so you can re-query a narrower subtree.";
         }
 
         /// <summary>
         /// Execute the GetGameObject tool with the provided parameters
         /// </summary>
-        /// <param name="parameters">Tool parameters as a JObject. Should include 'idOrName' which can be an instance ID, name, or path</param>
+        /// <param name="parameters">Tool parameters as a JObject. Required 'idOrName' (instance ID, name, or path).
+        /// Optional 'maxDepth' (int, default 2), 'includeComponents' (bool, default true),
+        /// 'includeComponentProperties' (bool, default true).</param>
         /// <returns>A JObject containing the GameObject data</returns>
         public override JObject Execute(JObject parameters)
         {
@@ -69,8 +71,13 @@ namespace McpUnity.Tools
                 );
             }
 
+            int maxDepth = parameters["maxDepth"]?.ToObject<int?>() ?? GetGameObjectResource.DefaultMaxChildDepth;
+            bool includeComponents = parameters["includeComponents"]?.ToObject<bool?>() ?? true;
+            bool includeComponentProperties = parameters["includeComponentProperties"]?.ToObject<bool?>() ?? true;
+
             // Convert the GameObject to a JObject using the resource's static method
-            JObject gameObjectData = GetGameObjectResource.GameObjectToJObject(gameObject, true);
+            JObject gameObjectData = GetGameObjectResource.GameObjectToJObject(
+                gameObject, true, maxDepth, includeComponents, includeComponentProperties);
 
             // Create the response
             return new JObject

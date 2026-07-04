@@ -8,12 +8,33 @@ import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 // Constants for the tool
 const toolName = "get_gameobject";
 const toolDescription =
-  "Retrieves detailed information about a specific GameObject by instance ID, name, or hierarchical path (e.g., 'Parent/Child/MyObject'). Returns all component properties including Transform position, rotation, scale, and more.";
+  "Retrieves detailed information about a specific GameObject by instance ID, name, or hierarchical path (e.g., 'Parent/Child/MyObject'). Returns component info plus a scoped child hierarchy. Use 'maxDepth', 'includeComponents', and 'includeComponentProperties' to control response size and avoid token/response limits. If a node carries '_truncated: true' with reason 'depth_limit' or 'size_limit_exceeded', re-query that node directly with narrower parameters.";
 const paramsSchema = z.object({
   idOrName: z
     .string()
     .describe(
       "The instance ID (integer), name, or hierarchical path of the GameObject to retrieve. Use hierarchical paths like 'Canvas/Panel/Button' for nested objects."
+    ),
+  maxDepth: z
+    .number()
+    .int()
+    .min(0)
+    .max(50)
+    .optional()
+    .describe(
+      "Maximum child hierarchy depth to traverse. 0 = no children, 1 = direct children, 2 = grandchildren. Default: 2. Increase only when you actually need a deeper tree — large scenes can exceed the MCP 15MB response cap."
+    ),
+  includeComponents: z
+    .boolean()
+    .optional()
+    .describe(
+      "Include the component list on each node. Set false to get a hierarchy-only outline. Default: true."
+    ),
+  includeComponentProperties: z
+    .boolean()
+    .optional()
+    .describe(
+      "Include serialized property values for each component. Set false to keep component type names only (saves substantial tokens). Default: true."
     ),
 });
 
@@ -63,13 +84,16 @@ async function toolHandler(
   mcpUnity: McpUnity,
   params: z.infer<typeof paramsSchema>
 ): Promise<CallToolResult> {
-  const { idOrName } = params;
+  const { idOrName, maxDepth, includeComponents, includeComponentProperties } = params;
 
   // Send request to Unity
   const response = await mcpUnity.sendRequest({
     method: toolName,
     params: {
-      idOrName: idOrName,
+      idOrName,
+      maxDepth,
+      includeComponents,
+      includeComponentProperties,
     },
   });
 

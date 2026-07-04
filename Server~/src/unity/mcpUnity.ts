@@ -7,7 +7,7 @@ import { UnityConnection, ConnectionState, ConnectionStateChange, UnityConnectio
 import { CommandQueue, CommandQueueConfig, CommandQueueStats, QueuedCommand } from './commandQueue.js';
 
 // Top-level constant for the Unity settings JSON path
-const MCP_UNITY_SETTINGS_PATH = path.resolve(process.cwd(), '../ProjectSettings/McpUnitySettings.json');
+const MCP_UNITY_SETTINGS_PATH = path.resolve(process.cwd(), './ProjectSettings/McpUnitySettings.json');
 
 interface PendingRequest {
   resolve: (value: any) => void;
@@ -426,11 +426,6 @@ export class McpUnity {
           this.logger.error(`Request ${requestId} timed out after ${timeoutMs}ms`);
           this.pendingRequests.delete(requestId);
           reject(new McpUnityError(ErrorType.TIMEOUT, 'Request timed out'));
-
-          // Force reconnection on timeout (connection may be stale)
-          if (this.connection) {
-            this.connection.forceReconnect();
-          }
         }
       }, timeoutMs);
 

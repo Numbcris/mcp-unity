@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEditor;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using WebSocketSharp;
@@ -21,15 +24,17 @@ namespace McpUnity.Unity
     public class McpUnitySocketHandler : WebSocketBehavior
     {
         private readonly McpUnityServer _server;
-        
+        private readonly int _connectionGeneration;
+
         /// <summary>
-        /// Default constructor required by WebSocketSharp
+        /// Creates a WebSocket handler for the active server generation.
         /// </summary>
-        public McpUnitySocketHandler(McpUnityServer server)
+        public McpUnitySocketHandler(McpUnityServer server, int connectionGeneration)
         {
             _server = server;
+            _connectionGeneration = connectionGeneration;
         }
-        
+
         /// <summary>
         /// Create a standardized error response
         /// </summary>
@@ -49,21 +54,131 @@ namespace McpUnity.Unity
         }
         
         /// <summary>
-        /// Handle incoming messages from WebSocket clients
+        /// Handle incoming messages from WebSocket clients.
+        /// WebSocketSharp invokes this on a background thread; we marshal the entire
+        /// message-handling body onto Unity's main thread via EditorApplication.delayCall
+        /// before touching any Editor APIs.
+        ///
+        /// Why this matters: accessing EditorStyles or scheduling EditorCoroutines from
+        /// a background thread can NRE inside PropertyEditor+Styles..cctor, which under
+        /// CLR rules permanently bricks that type for the rest of the AppDomain and
+        /// turns the Inspector black until Unity is restarted.
         /// </summary>
-        protected override async void OnMessage(MessageEventArgs e)
+        protected override void OnMessage(MessageEventArgs e)
+        {
+            if (!_server.ShouldTrackClient(_connectionGeneration))
+            {
+                CloseUntrackedConnection();
+                return;
+            }
+
+            string data = e.Data;
+            EditorApplication.delayCall += () => HandleMessageAsync(data);
+        }
+
+        /// <summary>
+        /// Handle WebSocket connection open.
+        /// Supports multiple concurrent MCP clients (e.g. multiple Claude Code instances).
+        /// Cleans up only inactive (dead) sessions to prevent file descriptor accumulation
+        /// while keeping other active clients connected.
+        /// websocket-sharp uses Mono's IOSelector/select(), which can crash when FD
+        /// values exceed ~1024, so stale session cleanup is important.
+        /// See: https://github.com/CoderGamester/mcp-unity/issues/110
+        /// </summary>
+        protected override void OnOpen()
+        {
+            if (!_server.ShouldTrackClient(_connectionGeneration))
+            {
+                CloseUntrackedConnection();
+                return;
+            }
+
+            // Clean up inactive (dead) sessions to prevent file descriptor accumulation.
+            // Only removes sessions that are no longer connected — active clients are preserved.
+            // Note: Do NOT use ActiveIDs here — it pings every client and blocks.
+            var inactiveIds = Sessions.InactiveIDs.ToList();
+            if (inactiveIds.Count > 0)
+            {
+                foreach (var oldId in inactiveIds)
+                {
+                    // Also remove from our tracking dictionary
+                    _server.Clients.TryRemove(oldId, out _);
+                    try
+                    {
+                        Sessions.CloseSession(oldId, CloseStatusCode.Normal, "Stale session cleanup");
+                    }
+                    catch (Exception ex)
+                    {
+                        McpLogger.LogWarning($"Error closing stale session {oldId}: {ex.Message}");
+                    }
+                }
+                McpLogger.LogInfo($"Cleaned up {inactiveIds.Count} inactive session(s)");
+            }
+
+            // Extract client name from the X-Client-Name header (if available)
+            string clientName = "";
+            NameValueCollection headers = Context.Headers;
+            if (headers != null && headers.Contains("X-Client-Name"))
+            {
+                clientName = headers["X-Client-Name"];
+            }
+
+            if (!_server.ShouldTrackClient(_connectionGeneration))
+            {
+                CloseUntrackedConnection();
+                return;
+            }
+
+            // Add the client to the server's tracking dictionary
+            _server.Clients[ID] = clientName;
+
+            McpLogger.LogInfo($"WebSocket client connected (ID: {ID}, Name: {(string.IsNullOrEmpty(clientName) ? "Unknown" : clientName)}, Total clients: {_server.Clients.Count})");
+        }
+
+        /// <summary>
+        /// Handle WebSocket connection close
+        /// </summary>
+        protected override void OnClose(CloseEventArgs e)
+        {
+            _server.Clients.TryGetValue(ID, out string clientName);
+
+            // Remove the client from the server
+            _server.Clients.TryRemove(ID, out _);
+
+            McpLogger.LogInfo($"WebSocket client '{clientName}' disconnected: {e.Reason} (Remaining clients: {_server.Clients.Count})");
+        }
+
+        /// <summary>
+        /// Handle WebSocket errors
+        /// </summary>
+        protected override void OnError(ErrorEventArgs e)
+        {
+            McpLogger.LogError($"WebSocket error: {e.Message}");
+        }
+
+        /// <summary>
+        /// Process a WebSocket message on the Unity main thread.
+        /// Safe to call EditorCoroutineUtility, Selection, and other Editor APIs from here.
+        /// </summary>
+        private async void HandleMessageAsync(string data)
         {
             try
             {
-                McpLogger.LogInfo($"WebSocket message received: {e.Data}");
+                if (!_server.ShouldTrackClient(_connectionGeneration))
+                {
+                    CloseUntrackedConnection();
+                    return;
+                }
+
+                McpLogger.LogInfo($"WebSocket message received: {data}");
                 JObject requestJson;
                 try
                 {
-                    requestJson = JObject.Parse(e.Data);
+                    requestJson = JObject.Parse(data);
                 }
                 catch (JsonReaderException jre)
                 {
-                    McpLogger.LogError($"Invalid JSON received: {jre.Message}. Data: {e.Data}");
+                    McpLogger.LogError($"Invalid JSON received: {jre.Message}. Data: {data}");
                     // Attempt to send a parse error response. No requestId is available yet.
                     Send(CreateResponse(null, CreateErrorResponse($"Invalid JSON format: {jre.Message}", "invalid_json")).ToString(Formatting.None));
                     return;
@@ -74,7 +189,7 @@ namespace McpUnity.Unity
                 var requestId = requestJson["id"]?.ToString();
                 // We need to dispatch to Unity's main thread and wait for completion
                 var tcs = new TaskCompletionSource<JObject>();
-                
+
                 if (string.IsNullOrEmpty(method))
                 {
                     tcs.SetResult(CreateErrorResponse("Missing method in request", "invalid_request"));
@@ -91,62 +206,38 @@ namespace McpUnity.Unity
                 {
                     tcs.SetResult(CreateErrorResponse($"Unknown method: {method}", "unknown_method"));
                 }
-                
+
                 JObject responseJson = await tcs.Task;
                 JObject jsonRpcResponse = CreateResponse(requestId, responseJson);
                 string responseStr = jsonRpcResponse.ToString(Formatting.None);
-                
+
                 McpLogger.LogInfo($"WebSocket message response for request ID '{requestId}': {responseStr}");
-                
+
                 // Send the response back to the client
                 Send(responseStr);
             }
             catch (Exception ex)
             {
                 McpLogger.LogError($"Error processing message: {ex.Message}");
-                
+
                 Send(CreateErrorResponse($"Internal server error: {ex.Message}", "internal_error").ToString(Formatting.None));
             }
         }
-        
-        /// <summary>
-        /// Handle WebSocket connection open
-        /// </summary>
-        protected override void OnOpen()
+
+        private void CloseUntrackedConnection()
         {
-            // Extract client name from the X-Client-Name header (if available)
-            string clientName = "";
-            NameValueCollection headers = Context.Headers;
-            if (headers != null && headers.Contains("X-Client-Name"))
+            try
             {
-                clientName = headers["X-Client-Name"];
+                WebSocket webSocket = Context?.WebSocket;
+                if (webSocket?.ReadyState == WebSocketState.Open)
+                {
+                    webSocket.Close(CloseStatusCode.Away, "Server is restarting");
+                }
             }
-            
-            // Always add the client to the server's tracking dictionary
-            _server.Clients[ID] = clientName;
-            
-            McpLogger.LogInfo($"WebSocket client connected (ID: {ID}, Name: {(string.IsNullOrEmpty(clientName) ? "Unknown" : clientName)})");
-        }
-        
-        /// <summary>
-        /// Handle WebSocket connection close
-        /// </summary>
-        protected override void OnClose(CloseEventArgs e)
-        {
-            _server.Clients.TryGetValue(ID, out string clientName);
-            
-            // Remove the client from the server
-            _server.Clients.Remove(ID);
-            
-            McpLogger.LogInfo($"WebSocket client '{clientName}' disconnected: {e.Reason}");
-        }
-        
-        /// <summary>
-        /// Handle WebSocket errors
-        /// </summary>
-        protected override void OnError(ErrorEventArgs e)
-        {
-            McpLogger.LogError($"WebSocket error: {e.Message}");
+            catch (Exception ex)
+            {
+                McpLogger.LogWarning($"Error closing untracked WebSocket connection: {ex.Message}");
+            }
         }
         
         /// <summary>

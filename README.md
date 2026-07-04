@@ -41,7 +41,7 @@
      ╚═╝     ╚═╝ ╚═════╝╚═╝              ╚═════╝ ╚═╝  ╚═══╝╚═╝   ╚═╝      ╚═╝   
 ```       
 
-MCP Unity is an implementation of the Model Context Protocol for Unity Editor, allowing AI assistants to interact with your Unity projects. This package provides a bridge between Unity and a Node.js server that implements the MCP protocol, enabling AI agents like Cursor, Windsurf, Claude Code, Codex CLI, GitHub Copilot, and Google Antigravity to execute operations within the Unity Editor.
+MCP Unity is an implementation of the Model Context Protocol for Unity Editor, allowing AI assistants to interact with your Unity projects. This package provides a bridge between Unity and a Node.js server that implements the MCP protocol, enabling AI agents like Cursor, Windsurf, Claude Code, Codex CLI, GitHub Copilot, Google Antigravity, and OpenCode to execute operations within the Unity Editor.
 
 ## Features
 
@@ -241,6 +241,13 @@ Installing this MCP Unity Server is a multi-step process:
 
 ![image](docs/configure.jpg)
 
+> **Global vs. Project configuration:**
+   > - **Configure \[Client\]** — writes to your global user config file (e.g. `~/.claude.json`). Uses an absolute path. Applies to all projects on your machine. Best for personal, single-developer setups.
+   > - **Configure \[Client\] (Project)** — writes to a `.mcp.json` file (or equivalent) in the Unity project root. Uses a relative path, so it works across machines. Intended to be committed to git and shared with the team. Best for collaborative projects or when you want the config to travel with the project.
+   >
+   > If in doubt, prefer the **(Project)** variant — the relative path is more portable and won't break if you move your project folder.
+
+
 4. Confirm the configuration installation with the given popup
 
 ![image](https://github.com/user-attachments/assets/b1f05d33-3694-4256-a57b-8556005021ba)
@@ -253,6 +260,10 @@ Installing this MCP Unity Server is a multi-step process:
 Open the MCP configuration file of your AI client and add the MCP Unity server configuration:
 
 > Replace `ABSOLUTE/PATH/TO` with the absolute path to your MCP Unity installation or just copy the text from the Unity Editor MCP Server window (Tools > MCP Unity > Server Window).
+>
+> For configs that live inside the Unity project tree and get committed to git (e.g. `<project>/.vscode/mcp.json`, `<project>/opencode.json`, `<project>/.cursor/mcp.json`, `<project>/.mcp.json`, `<project>/.codex/config.toml`), prefer a project-relative path so the same file works across machines. Toggle **"Use relative path"** in the Server Window to switch the copy-paste snippet between absolute and project-relative forms. The **Configure GitHub Copilot**, **Configure OpenCode**, **Configure Cursor (Project)**, **Configure Claude Code (Project)**, and **Configure Codex CLI (Project)** buttons already emit relative paths automatically.
+>
+> Project-local buttons (Cursor / Claude Code / Codex CLI) write the MCP server entry into the Unity project directory instead of your global user config, so other (non-Unity) projects don't see MCP connection-failure warnings. For **Codex CLI (Project)** specifically, you must approve the project trust prompt the first time you run `codex` from the project root, otherwise Codex ignores `<project>/.codex/config.toml`.
 
 **For JSON-based clients** (Cursor, Windsurf, Claude Code, GitHub Copilot, etc.):
 
@@ -269,6 +280,21 @@ Open the MCP configuration file of your AI client and add the MCP Unity server c
 }
 ```
 
+For workspace-scoped VS Code / GitHub Copilot (`.vscode/mcp.json`), use `${workspaceFolder}` so the path is portable across machines:
+
+```json
+{
+   "mcpServers": {
+       "mcp-unity": {
+          "command": "node",
+          "args": [
+             "${workspaceFolder}/Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"
+          ]
+       }
+   }
+}
+```
+
 **For Codex CLI** (`~/.codex/config.toml`):
 
 ```toml
@@ -277,13 +303,71 @@ command = "node"
 args = ["ABSOLUTE/PATH/TO/mcp-unity/Server~/build/index.js"]
 ```
 
+**For Cursor — project-local** (`.cursor/mcp.json` in the Unity project root, project-relative path):
+
+```json
+{
+   "mcpServers": {
+       "mcp-unity": {
+          "command": "node",
+          "args": [
+             "Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"
+          ]
+       }
+   }
+}
+```
+
+**For Claude Code — project-local** (`.mcp.json` in the Unity project root, project-relative path — Claude Code's team-shared MCP config):
+
+```json
+{
+   "mcpServers": {
+       "mcp-unity": {
+          "command": "node",
+          "args": [
+             "Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"
+          ]
+       }
+   }
+}
+```
+
+**For Codex CLI — project-local** (`.codex/config.toml` in the Unity project root, project-relative path):
+
+```toml
+[mcp_servers.mcp-unity]
+command = "node"
+args = ["Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"]
+```
+
+> Codex layers this file over the global `~/.codex/config.toml`, but only when the project is marked trusted. The first time you `cd` into the project and run `codex`, approve the trust prompt — otherwise Codex ignores `.codex/config.toml`.
+
+**For OpenCode** (`opencode.json` in the Unity project root):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mcp-unity": {
+      "type": "local",
+      "enabled": true,
+      "command": ["node", "Library/PackageCache/com.gamelovers.mcp-unity@<hash>/Server~/build/index.js"],
+      "environment": {}
+    }
+  }
+}
+```
+
+> Note: the `@<hash>` segment in the UPM package cache path changes when the package is updated. If you update MCP Unity, re-run the **Configure** button (or update the path manually) so the snippet points at the new cache directory.
+
 </details>
 
 ## <a name="start-server"></a>Start Unity Editor MCP Server
 1. Open the Unity Editor
 2. Navigate to Tools > MCP Unity > Server Window
 3. Click "Start Server" to start the WebSocket server
-4. Open your AI Coding IDE (e.g. Cursor, Windsurf, Claude Code, Codex CLI, GitHub Copilot, Google Antigravity, etc.) and start executing Unity tools
+4. Open your AI Coding IDE (e.g. Cursor, Windsurf, Claude Code, Codex CLI, GitHub Copilot, Google Antigravity, OpenCode, etc.) and start executing Unity tools
    
 ![connect](https://github.com/user-attachments/assets/2e266a8b-8ba3-4902-b585-b220b11ab9a2)
 
@@ -459,6 +543,7 @@ MCP Unity is designed to work with any AI assistant or development environment t
 -  Codex CLI
 -  GitHub Copilot
 -  Google Antigravity
+-  OpenCode
 
 </details>
 
@@ -508,6 +593,20 @@ Connection failed: Unknown error
 ```
 
 This error occurs because the bridge connection is lost when the domain reloads upon switching to Play Mode.  The workaround is to turn off **Reload Domain** in **Edit > Project Settings > Editor > "Enter Play Mode Settings"**.
+
+</details>
+
+<details>
+<summary><span style="font-size: 1.1em; font-weight: bold;">Why do some clients fail with <code>KeyError: 'position'</code> during tool initialization?</span></summary>
+
+Some MCP clients may fail while parsing tool schemas when they contain local JSON pointer references such as `#/properties/position`.
+
+MCP Unity avoids this by registering transform tool inputs (`set_transform`, `move_gameobject`, `rotate_gameobject`, `scale_gameobject`) with fresh nested vector schemas per field, so the generated schema does not rely on local `#/properties/...` references.
+
+If you still see this error:
+- update your MCP client to the latest version,
+- rebuild the Node server (`cd Server~ && npm run build`),
+- confirm your package version includes this compatibility fix.
 
 </details>
 

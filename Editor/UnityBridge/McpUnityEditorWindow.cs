@@ -22,6 +22,7 @@ namespace McpUnity.Unity
         private bool _isInitialized = false;
         private string _mcpConfigJson = "";
         private bool _tabsIndentationJson = false;
+        private bool _useRelativePathJson = false;
         private Vector2 _helpTabScrollPosition = Vector2.zero;
         private Vector2 _serverTabScrollPosition = Vector2.zero;
 
@@ -101,8 +102,7 @@ namespace McpUnity.Unity
             {
                 settings.Port = newPort;
                 settings.SaveSettings();
-                mcpUnityServer.StopServer();
-                mcpUnityServer.StartServer(); // Restart the server.newPort
+                mcpUnityServer.RestartServer();
             }
             EditorGUILayout.EndHorizontal();
             
@@ -143,8 +143,7 @@ namespace McpUnity.Unity
                 settings.AllowRemoteConnections = allowRemoteConnections;
                 settings.SaveSettings();
                 // Restart server to apply binding change
-                mcpUnityServer.StopServer();
-                mcpUnityServer.StartServer();
+                mcpUnityServer.RestartServer();
             }
             
             EditorGUILayout.Space();
@@ -174,6 +173,12 @@ namespace McpUnity.Unity
             if (GUILayout.Button("Stop Server", GUILayout.Height(30)))
             {
                 mcpUnityServer.StopServer();
+            }
+
+            GUI.enabled = true;
+            if (GUILayout.Button("Restart Server", GUILayout.Height(30)))
+            {
+                mcpUnityServer.RestartServer();
             }
             
             //Repaint();
@@ -238,12 +243,19 @@ namespace McpUnity.Unity
             EditorGUILayout.Space();
             EditorGUILayout.LabelField("MCP Configuration", EditorStyles.boldLabel);
 
-            var before = _tabsIndentationJson;
+            var beforeTabs = _tabsIndentationJson;
+            var beforeRelative = _useRelativePathJson;
             _tabsIndentationJson = EditorGUILayout.Toggle("Use Tabs indentation", _tabsIndentationJson);
-            
-            if (string.IsNullOrEmpty(_mcpConfigJson) || before != _tabsIndentationJson)
+            _useRelativePathJson = EditorGUILayout.Toggle(
+                new GUIContent(
+                    "Use relative path",
+                    "Emit a path relative to the Unity project root. Use this when pasting into workspace-scoped configs (e.g. .vscode/mcp.json) that are shared via git."),
+                _useRelativePathJson);
+
+            if (string.IsNullOrEmpty(_mcpConfigJson) || beforeTabs != _tabsIndentationJson || beforeRelative != _useRelativePathJson)
             {
-                _mcpConfigJson = McpUtils.GenerateMcpConfigJson(_tabsIndentationJson);
+                var pathMode = _useRelativePathJson ? PathMode.ProjectRelative : PathMode.Absolute;
+                _mcpConfigJson = McpUtils.GenerateMcpConfigJson(_tabsIndentationJson, pathMode);
             }
                 
             if (GUILayout.Button("Copy to Clipboard", GUILayout.Height(30)))
@@ -267,7 +279,15 @@ namespace McpUnity.Unity
 
             EditorGUILayout.Space();
 
+            ShowConfigButton("Cursor (Project)", McpUtils.AddToCursorProjectConfig);
+
+            EditorGUILayout.Space();
+
             ShowConfigButton("Claude Code", McpUtils.AddToClaudeCodeConfig);
+
+            EditorGUILayout.Space();
+
+            ShowConfigButton("Claude Code (Project)", McpUtils.AddToClaudeCodeProjectConfig);
 
             EditorGUILayout.Space();
 
@@ -279,7 +299,18 @@ namespace McpUnity.Unity
 
             EditorGUILayout.Space();
 
+            ShowConfigButton(
+                "Codex CLI (Project)",
+                McpUtils.AddToCodexCliProjectConfig,
+                "Codex only loads this project config after you mark the project as trusted. The first time you run `codex` from this project's root, approve the trust prompt.");
+
+            EditorGUILayout.Space();
+
             ShowConfigButton("Google Antigravity", McpUtils.AddToAntigravityConfig);
+
+            EditorGUILayout.Space();
+
+            ShowConfigButton("OpenCode", McpUtils.AddToOpenCodeConfig);
 
             EditorGUILayout.Separator();
             EditorGUILayout.Separator();
@@ -621,19 +652,34 @@ namespace McpUnity.Unity
         
             
         // Helper to show a config button with unified logic
-        private void ShowConfigButton(string configLabel, Func<bool, bool> configAction)
+        private void ShowConfigButton(string configLabel, Func<bool, bool> configAction, string successFollowUp = null)
         {
-            if (GUILayout.Button($"Configure {configLabel}", GUILayout.Height(30)))
+            bool isSupported = McpUtils.IsAutoConfigSupported(configLabel);
+
+            using (new EditorGUI.DisabledScope(!isSupported))
             {
-                bool added = configAction(_tabsIndentationJson);
-                if (added)
+                if (GUILayout.Button($"Configure {configLabel}", GUILayout.Height(30)))
                 {
-                    EditorUtility.DisplayDialog("Success", $"The MCP configuration was successfully added to the {configLabel} config file.", "OK");
+                    bool added = configAction(_tabsIndentationJson);
+                    if (added)
+                    {
+                        string message = $"The MCP configuration was successfully added to the {configLabel} config file.";
+                        if (!string.IsNullOrEmpty(successFollowUp))
+                        {
+                            message += "\n\n" + successFollowUp;
+                        }
+                        EditorUtility.DisplayDialog("Success", message, "OK");
+                    }
+                    else
+                    {
+                        EditorUtility.DisplayDialog("Error", $"The MCP configuration could not be added to the {configLabel} config file.", "OK");
+                    }
                 }
-                else
-                {
-                    EditorUtility.DisplayDialog("Error", $"The MCP configuration could not be added to the {configLabel} config file.", "OK");
-                }
+            }
+
+            if (!isSupported)
+            {
+                WrappedLabel(McpUtils.GetAutoConfigUnsupportedReason(configLabel), EditorStyles.miniLabel);
             }
         }
 

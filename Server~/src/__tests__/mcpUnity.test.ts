@@ -1,6 +1,11 @@
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { Logger, LogLevel } from '../utils/logger.js';
 import { McpUnityError, ErrorType } from '../utils/errors.js';
+import { McpUnity, ConnectionState } from '../unity/mcpUnity.js';
+import { registerTransformTools } from '../tools/transformTools.js';
 import path from 'path';
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 
 describe('McpUnityError integration', () => {
   it('should create proper error for connection issues', () => {
@@ -80,5 +85,121 @@ describe('Logger with path-related messages', () => {
     expect(() => {
       logger.error(`Failed to read file: ${pathWithSpaces}`);
     }).not.toThrow();
+  });
+});
+
+describe('Request timeout handling', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('rejects timed out requests without forcing a reconnect', async () => {
+    const logger = new Logger('Test', LogLevel.ERROR);
+    const unity = new McpUnity(logger, { queueingEnabled: false });
+    const connection = {
+      isConnected: true,
+      isConnecting: false,
+      connectionState: ConnectionState.Connected,
+      send: jest.fn(),
+      connect: jest.fn(),
+      disconnect: jest.fn(),
+      removeAllListeners: jest.fn(),
+      forceReconnect: jest.fn(),
+      getStats: jest.fn(() => ({
+        state: ConnectionState.Connected,
+        reconnectAttempt: 0,
+        timeSinceLastPong: 0
+      }))
+    };
+
+    (unity as any).connection = connection;
+
+    const request = {
+      id: 'request-timeout',
+      method: 'run_tests',
+      params: { mode: 'edit' }
+    };
+
+    const promise = unity.sendRequest(request, { timeout: 50 });
+    const timeoutResult = expect(promise).rejects.toMatchObject({
+      type: ErrorType.TIMEOUT,
+      message: 'Request timed out'
+    });
+
+    expect(connection.send).toHaveBeenCalledWith(JSON.stringify(request));
+
+    await jest.advanceTimersByTimeAsync(50);
+    await timeoutResult;
+
+    expect(connection.forceReconnect).not.toHaveBeenCalled();
+    expect(unity.getConnectionStats().pendingRequests).toBe(0);
+    expect(unity.connectionState).toBe(ConnectionState.Connected);
+
+    await unity.stop();
+  });
+});
+
+describe('Transform schema compatibility', () => {
+  const mockSendRequest = jest.fn();
+  const mockMcpUnity = { sendRequest: mockSendRequest };
+  const mockLogger = {
+    info: jest.fn(),
+    debug: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn()
+  };
+  const mockServerTool = jest.fn();
+  const mockServer = { tool: mockServerTool };
+
+  function collectLocalPropertyRefs(node: unknown, refs: string[] = []): string[] {
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        collectLocalPropertyRefs(item, refs);
+      }
+      return refs;
+    }
+
+    if (!node || typeof node !== 'object') {
+      return refs;
+    }
+
+    for (const [key, value] of Object.entries(node)) {
+      if (key === '$ref' && typeof value === 'string' && value.startsWith('#/properties/')) {
+        refs.push(value);
+      }
+      collectLocalPropertyRefs(value, refs);
+    }
+
+    return refs;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('registers transform tools', () => {
+    registerTransformTools(mockServer as any, mockMcpUnity as any, mockLogger as any);
+
+    expect(mockServerTool).toHaveBeenCalledTimes(4);
+    expect(mockServerTool).toHaveBeenCalledWith('move_gameobject', expect.any(String), expect.any(Object), expect.any(Function));
+    expect(mockServerTool).toHaveBeenCalledWith('rotate_gameobject', expect.any(String), expect.any(Object), expect.any(Function));
+    expect(mockServerTool).toHaveBeenCalledWith('scale_gameobject', expect.any(String), expect.any(Object), expect.any(Function));
+    expect(mockServerTool).toHaveBeenCalledWith('set_transform', expect.any(String), expect.any(Object), expect.any(Function));
+  });
+
+  it('does not emit local #/properties refs for transform tool schemas', () => {
+    registerTransformTools(mockServer as any, mockMcpUnity as any, mockLogger as any);
+
+    for (const call of mockServerTool.mock.calls) {
+      const paramsShape = call[2];
+      const schemaJson = zodToJsonSchema(z.object(paramsShape), { strictUnions: true });
+      const refs = collectLocalPropertyRefs(schemaJson);
+
+      expect(refs).toEqual([]);
+    }
   });
 });
