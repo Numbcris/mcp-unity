@@ -591,6 +591,19 @@ namespace McpUnity.Unity
             GetMaterialInfoTool getMaterialInfoTool = new GetMaterialInfoTool();
             _tools.Add(getMaterialInfoTool.Name, getMaterialInfoTool);
 
+            // Register Screenshot Tools
+            CaptureSceneViewTool captureSceneViewTool = new CaptureSceneViewTool();
+            _tools.Add(captureSceneViewTool.Name, captureSceneViewTool);
+
+            CaptureGameViewTool captureGameViewTool = new CaptureGameViewTool();
+            _tools.Add(captureGameViewTool.Name, captureGameViewTool);
+
+            CaptureCameraTool captureCameraTool = new CaptureCameraTool();
+            _tools.Add(captureCameraTool.Name, captureCameraTool);
+
+            CaptureIsolatedObjectTool captureIsolatedObjectTool = new CaptureIsolatedObjectTool();
+            _tools.Add(captureIsolatedObjectTool.Name, captureIsolatedObjectTool);
+
             // Register BatchExecuteTool (must be registered last as it needs access to other tools)
             BatchExecuteTool batchExecuteTool = new BatchExecuteTool(this);
             _tools.Add(batchExecuteTool.Name, batchExecuteTool);

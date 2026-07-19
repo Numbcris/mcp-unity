@@ -1,5 +1,11 @@
 # MCP Unity Editor (Game Engine)
 
+> **This is a fork of [CoderGamester/mcp-unity](https://github.com/CoderGamester/mcp-unity)**, used as a git-URL package dependency for the Velgrimor project.
+>
+> Added on top of upstream: 4 screenshot/capture tools (`capture_scene_view`, `capture_game_view`, `capture_camera`, `capture_isolated_object`) in `Editor/Tools/ScreenshotTools.cs` and `Server~/src/tools/screenshotTools.ts`, registered the same way as the existing Material tools. No upstream files were removed or renamed. See `git log` on this fork for the exact diff, and the `upstream` remote for pulling future updates from CoderGamester/mcp-unity.
+>
+> Distributed under the original MIT license (see `LICENSE.md`); this fork changes nothing about that license.
+
 [![](https://badge.mcpx.dev?status=on 'MCP Enabled')](https://modelcontextprotocol.io/introduction)
 [![](https://img.shields.io/badge/Unity-000000?style=flat&logo=unity&logoColor=white 'Unity')](https://unity.com/releases/editor/archive)
 [![](https://img.shields.io/badge/Node.js-339933?style=flat&logo=nodedotjs&logoColor=white 'Node.js')](https://nodejs.org/en/download/)
