@@ -1,7 +1,9 @@
 using System;
+using System.Threading.Tasks;
 using McpUnity.Unity;
 using McpUnity.Utils;
 using UnityEngine;
+using UnityEngine.Rendering;
 using UnityEditor;
 using Newtonsoft.Json.Linq;
 
@@ -196,41 +198,116 @@ namespace McpUnity.Tools
         public CaptureGameViewTool()
         {
             Name = "capture_game_view";
-            Description = "Captures what the main game Camera currently sees (the player's view, without Editor gizmos/overlays) and returns it as a base64-encoded PNG image";
+            Description = "Captures the actual composited Game View frame, 3D scene AND UI Toolkit Screen Space Overlay panels (HUD, menus) alike -- what the player actually sees. In Play Mode this reads Unity's own real backbuffer (ScreenCapture.CaptureScreenshotAsTexture) right after a frame finishes rendering; outside Play (no Overlay UIDocuments exist yet) it falls back to a direct camera render, same as before. Never modifies the project -- no new components, no asset/config changes, nothing left behind.";
+            IsAsync = true;
         }
 
-        public override JObject Execute(JObject parameters)
+        public override void ExecuteAsync(JObject parameters, TaskCompletionSource<JObject> tcs)
         {
-            Camera camera = ScreenshotToolUtils.FindMainCamera();
-            if (camera == null)
-            {
-                return McpUnitySocketHandler.CreateErrorResponse(
-                    "No active Camera found in the currently loaded scene(s).",
-                    "not_found_error"
-                );
-            }
-
             int? requestedWidth = parameters["width"]?.ToObject<int?>();
             int? requestedHeight = parameters["height"]?.ToObject<int?>();
             (int width, int height) = ScreenshotToolUtils.ClampResolution(requestedWidth, requestedHeight);
 
-            Texture2D texture = ScreenshotToolUtils.RenderCameraToTexture2D(camera, width, height);
-            string base64 = ScreenshotToolUtils.EncodePngBase64(texture);
-            UnityEngine.Object.DestroyImmediate(texture);
-
-            McpLogger.LogInfo($"[MCP Unity] Captured Game View screenshot from camera '{camera.name}' ({width}x{height})");
-
-            return new JObject
+            if (!EditorApplication.isPlaying)
             {
-                ["success"] = true,
-                ["type"] = "image",
-                ["message"] = $"Captured Game View screenshot from camera '{camera.name}' ({width}x{height})",
-                ["data"] = base64,
-                ["mimeType"] = "image/png",
-                ["width"] = width,
-                ["height"] = height,
-                ["cameraName"] = camera.name
+                // Sin Play no hay UIDocument de Overlay corriendo (el HUD/menús solo existen en
+                // Play) -- nada que un frame completo agregaría por encima del render de cámara
+                // de siempre, así que cae ahí directo.
+                Camera fallbackCamera = ScreenshotToolUtils.FindMainCamera();
+                if (fallbackCamera == null)
+                {
+                    tcs.SetResult(McpUnitySocketHandler.CreateErrorResponse(
+                        "No active Camera found in the currently loaded scene(s).", "not_found_error"));
+                    return;
+                }
+
+                Texture2D fallbackTexture = ScreenshotToolUtils.RenderCameraToTexture2D(fallbackCamera, width, height);
+                string fallbackBase64 = ScreenshotToolUtils.EncodePngBase64(fallbackTexture);
+                UnityEngine.Object.DestroyImmediate(fallbackTexture);
+
+                McpLogger.LogInfo($"[MCP Unity] Captured Game View (camera-only -- not in Play, no UI Toolkit Overlay exists yet) from '{fallbackCamera.name}' ({width}x{height})");
+
+                tcs.SetResult(new JObject
+                {
+                    ["success"] = true,
+                    ["type"] = "image",
+                    ["message"] = $"Captured Game View (camera-only -- not in Play Mode, so there is no UI to include) from camera '{fallbackCamera.name}' ({width}x{height})",
+                    ["data"] = fallbackBase64,
+                    ["mimeType"] = "image/png",
+                    ["width"] = width,
+                    ["height"] = height,
+                    ["cameraName"] = fallbackCamera.name,
+                    ["includesUI"] = false
+                });
+                return;
+            }
+
+            // Espera al fin del cuadro SIN un MonoBehaviour/coroutine nuevo -- AddComponent de un
+            // tipo recién compilado devuelve null en pleno Play con recarga de dominio
+            // desactivada (Unity nunca lo registra sin una recarga real, confirmado con datos
+            // reales, Cris 2026-07-19). RenderPipelineManager.endContextRendering es un evento
+            // ESTÁTICO del motor (siempre registrado, no un tipo nuevo del proyecto) que se
+            // dispara justo al terminar de renderizar -- ninguna de las dos formas toca nada del
+            // juego, ambas son enteramente del lado de la herramienta.
+            bool captured = false;
+            Action<ScriptableRenderContext, System.Collections.Generic.List<Camera>> onEndContext = null;
+            onEndContext = (context, cameras) =>
+            {
+                if (captured) return; // ya resuelto por el timeout de seguridad, no duplicar
+                captured = true;
+                RenderPipelineManager.endContextRendering -= onEndContext;
+                CaptureNow(tcs, width, height);
             };
+            RenderPipelineManager.endContextRendering += onEndContext;
+
+            // Salvavidas: si por lo que sea el evento nunca se dispara (ej. nada re-renderiza ese
+            // instante), no dejar el TCS colgado para siempre -- se resuelve solo, con lo que
+            // Unity tenga en el backbuffer en ese momento, en vez de trabar al cliente MCP.
+            double timeoutAt = EditorApplication.timeSinceStartup + 2.0;
+            EditorApplication.CallbackFunction timeoutTick = null;
+            timeoutTick = () =>
+            {
+                if (captured) { EditorApplication.update -= timeoutTick; return; }
+                if (EditorApplication.timeSinceStartup < timeoutAt) return;
+
+                captured = true;
+                RenderPipelineManager.endContextRendering -= onEndContext;
+                EditorApplication.update -= timeoutTick;
+                McpLogger.LogWarning("[MCP Unity] capture_game_view: endContextRendering never fired within 2s, capturing whatever is in the backbuffer now");
+                CaptureNow(tcs, width, height);
+            };
+            EditorApplication.update += timeoutTick;
+        }
+
+        static void CaptureNow(TaskCompletionSource<JObject> tcs, int requestedWidth, int requestedHeight)
+        {
+            try
+            {
+                Texture2D texture = ScreenCapture.CaptureScreenshotAsTexture();
+                string base64 = ScreenshotToolUtils.EncodePngBase64(texture);
+                int capturedWidth = texture.width;
+                int capturedHeight = texture.height;
+                UnityEngine.Object.DestroyImmediate(texture);
+
+                McpLogger.LogInfo($"[MCP Unity] Captured full Game View frame (3D + UI Toolkit Overlay), native resolution {capturedWidth}x{capturedHeight} (requested {requestedWidth}x{requestedHeight} -- ignored for this in-Play path, the real backbuffer is always returned as-is to avoid distorting the UI)");
+
+                tcs.SetResult(new JObject
+                {
+                    ["success"] = true,
+                    ["type"] = "image",
+                    ["message"] = $"Captured full Game View frame, 3D scene + UI Toolkit Overlay included, native resolution ({capturedWidth}x{capturedHeight})",
+                    ["data"] = base64,
+                    ["mimeType"] = "image/png",
+                    ["width"] = capturedWidth,
+                    ["height"] = capturedHeight,
+                    ["includesUI"] = true
+                });
+            }
+            catch (Exception ex)
+            {
+                tcs.SetResult(McpUnitySocketHandler.CreateErrorResponse(
+                    $"Failed to capture full Game View frame: {ex.Message}", "capture_error"));
+            }
         }
     }
 
