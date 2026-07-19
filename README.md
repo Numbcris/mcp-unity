@@ -2,7 +2,11 @@
 
 > **This is a fork of [CoderGamester/mcp-unity](https://github.com/CoderGamester/mcp-unity)**, used as a git-URL package dependency for the Velgrimor project.
 >
-> Added on top of upstream: 4 screenshot/capture tools (`capture_scene_view`, `capture_game_view`, `capture_camera`, `capture_isolated_object`) in `Editor/Tools/ScreenshotTools.cs` and `Server~/src/tools/screenshotTools.ts`, registered the same way as the existing Material tools. No upstream files were removed or renamed. See `git log` on this fork for the exact diff, and the `upstream` remote for pulling future updates from CoderGamester/mcp-unity.
+> Forked from upstream commit [`c523d75`](https://github.com/CoderGamester/mcp-unity/commit/c523d75b086d) (PR #149, "fix-codex-websocket-origin") — deliberately, not from upstream's current `main`. That commit is the exact version this fork's downstream Unity project has resolved, built, and verified working; upstream has since moved ~22 commits ahead (new Play Mode tools, a web dashboard, other changes) that have not been reviewed or tested here.
+>
+> Added on top of that commit: 4 screenshot/capture tools (`capture_scene_view`, `capture_game_view`, `capture_camera`, `capture_isolated_object`) in `Editor/Tools/ScreenshotTools.cs` and `Server~/src/tools/screenshotTools.ts`, registered the same way as the existing Material tools. No upstream files were removed or renamed.
+>
+> **Updating from upstream is a deliberate decision, not something to do casually or automatically**: pull from the `upstream` remote, review what changed (especially in `Editor/UnityBridge/McpUnityServer.cs` and `Server~/src/index.ts`, where this fork's registration edits live and are most likely to conflict), merge, then re-verify the downstream Unity project against the merged result before relying on it — the same bar as any other update to a dependency this project's tooling depends on. Do not fast-forward `main` to upstream without doing that.
 >
 > Distributed under the original MIT license (see `LICENSE.md`); this fork changes nothing about that license.
 
