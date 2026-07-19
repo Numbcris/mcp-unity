@@ -475,8 +475,19 @@ namespace McpUnity.Tools
                 tempCamera.farClipPlane = distance + radius * 2f;
 
                 Texture2D texture = ScreenshotToolUtils.RenderCameraToTexture2D(tempCamera, width, height);
-                string base64 = ScreenshotToolUtils.EncodePngBase64(texture);
+                byte[] pngBytes = texture.EncodeToPNG();
+                string base64 = System.Convert.ToBase64String(pngBytes);
                 UnityEngine.Object.DestroyImmediate(texture);
+
+                // Además de devolver la imagen inline (como siempre), la escribe SIEMPRE a un
+                // path fijo en disco -- necesario para post-procesar (recorte/alfa) fuera de
+                // Unity, ej. generar un ícono de ítem desde un asset sin Previews/ propio (Cris,
+                // 2026-07-19). Path fijo (no un parámetro nuevo) para no depender de que el
+                // servidor Node ya compilado conozca un campo que todavía no existe del lado TS
+                // -- evita necesitar un reinicio de Claude Code solo para esto. Se pisa en cada
+                // llamada, es un scratch de una sola imagen a la vez, no un archivo por captura.
+                const string savePath = @"C:\Users\cris8\AppData\Local\Temp\claude\D--Velgrimor\746ca987-f692-4b38-a000-7cc380984845\scratchpad\last_isolated_capture.png";
+                System.IO.File.WriteAllBytes(savePath, pngBytes);
 
                 McpLogger.LogInfo($"[MCP Unity] Captured isolated screenshot of '{gameObject.name}' from '{angleKey}' angle ({width}x{height})");
 
@@ -490,7 +501,8 @@ namespace McpUnity.Tools
                     ["width"] = width,
                     ["height"] = height,
                     ["gameObjectName"] = gameObject.name,
-                    ["angle"] = angleKey
+                    ["angle"] = angleKey,
+                    ["savedTo"] = savePath
                 };
             }
             finally
