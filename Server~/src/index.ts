@@ -25,7 +25,6 @@ import { registerTransformTools } from './tools/transformTools.js';
 import { registerCreateMaterialTool, registerAssignMaterialTool, registerModifyMaterialTool, registerGetMaterialInfoTool } from './tools/materialTools.js';
 import { registerDuplicateGameObjectTool, registerDeleteGameObjectTool, registerReparentGameObjectTool } from './tools/gameObjectTools.js';
 import { registerCaptureSceneViewTool, registerCaptureGameViewTool, registerCaptureCameraTool, registerCaptureIsolatedObjectTool } from './tools/screenshotTools.js';
-import { registerSimulateKeyPressTool } from './tools/simulateInputTools.js';
 import { registerBatchExecuteTool } from './tools/batchExecuteTool.js';
 import { registerGetMenuItemsResource } from './resources/getMenuItemResource.js';
 import { registerGetConsoleLogsResource } from './resources/getConsoleLogsResource.js';
@@ -95,9 +94,6 @@ registerCaptureSceneViewTool(server, mcpUnity, toolLogger);
 registerCaptureGameViewTool(server, mcpUnity, toolLogger);
 registerCaptureCameraTool(server, mcpUnity, toolLogger);
 registerCaptureIsolatedObjectTool(server, mcpUnity, toolLogger);
-
-// Register Simulated Input Tools
-registerSimulateKeyPressTool(server, mcpUnity, toolLogger);
 
 // Register Batch Execute Tool (high-priority for performance)
 registerBatchExecuteTool(server, mcpUnity, toolLogger);

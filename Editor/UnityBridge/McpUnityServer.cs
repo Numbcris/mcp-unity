@@ -604,10 +604,6 @@ namespace McpUnity.Unity
             CaptureIsolatedObjectTool captureIsolatedObjectTool = new CaptureIsolatedObjectTool();
             _tools.Add(captureIsolatedObjectTool.Name, captureIsolatedObjectTool);
 
-            // Register Simulated Input Tools
-            SimulateKeyPressTool simulateKeyPressTool = new SimulateKeyPressTool();
-            _tools.Add(simulateKeyPressTool.Name, simulateKeyPressTool);
-
             // Register BatchExecuteTool (must be registered last as it needs access to other tools)
             BatchExecuteTool batchExecuteTool = new BatchExecuteTool(this);
             _tools.Add(batchExecuteTool.Name, batchExecuteTool);
@@ -732,8 +728,22 @@ namespace McpUnity.Unity
                     }
                     break;
                 case PlayModeStateChange.EnteredPlayMode:
+                    // The assumption above (server stays down through Play, a domain reload on exit
+                    // will restart it) only holds when Enter Play Mode Options are OFF or don't disable
+                    // domain reload. With "Reload Scene without Reload Domain" (a real, supported Unity
+                    // profile some projects pick specifically for iteration speed), NO domain reload
+                    // happens on either side of Play Mode -- so nothing was ever going to bring the
+                    // server back. That left it down for the entire Play session, with no way for a
+                    // client to even ask Unity to exit Play (that request needs this same server).
+                    // Restarting here covers both profiles: if a domain reload already restarted it via
+                    // OnAfterAssemblyReload, IsListening is already true and this is a no-op; if it
+                    // didn't, this is the only thing that brings it back (Director, 2026-07-19).
+                    if (!_instance.IsListening && McpUnitySettings.Instance.AutoStartServer)
+                    {
+                        _instance.ScheduleStartServer(requireAutoStart: true, reason: "entered play mode");
+                    }
+                    break;
                 case PlayModeStateChange.ExitingPlayMode:
-                    // Server is disabled during play mode as domain reload will be triggered again when stopped.
                     break;
                 case PlayModeStateChange.EnteredEditMode:
                     // Returned to Edit Mode
