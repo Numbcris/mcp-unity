@@ -32,15 +32,35 @@ namespace McpUnity.Tools
     /// it flips both settings for the exact duration of the press (queue-down .. release) and restores
     /// whatever it found -- same released-in-every-exit-path guarantee as the key itself (own timer,
     /// Play Mode exit, domain reload).
+    ///
+    /// Movement (continuous ReadValue/IsPressed) worked from the very first version of this tool.
+    /// Edge-triggered actions (Dash, menu toggles -- anything gated on WasPressedThisFrame()) did not,
+    /// even after the focus-settings fix above. Root cause, found by reading the installed Input System
+    /// package source (ButtonControl.cs), not guessed: WasPressedThisFrame() doesn't compare live state
+    /// against last frame -- past the first-ever poll it compares InputUpdate.s_UpdateStepCount (a
+    /// global per-frame counter) against a per-control m_UpdateCountLastPressed value that gets stamped
+    /// with device.m_CurrentUpdateStepCount at the moment the press is processed. Queuing the event from
+    /// EditorApplication.delayCall/update (not synchronized with the Input System's own per-frame
+    /// pipeline) stamps it with whatever step count happens to be current at that arbitrary moment --
+    /// almost always one step behind the value the game checks against on the very next real frame, so
+    /// the edge is always "already in the past" by the time WasPressedThisFrame() reads it.
+    /// InputSystem.onBeforeUpdate is Unity's own documented fix for exactly this: "events queued from a
+    /// callback will be fed right into the upcoming update" -- queuing from inside it lands the state
+    /// change on the SAME step the game's Update() checks moments later, instead of a stale one.
     /// </summary>
     public class SimulateKeyPressTool : McpToolBase
     {
         // Estado de una sola tecla "prestada" a la vez -- soltarla es el recurso que hay que
         // garantizar en TODOS los caminos de salida (CLAUDE.md II.5), no solo el feliz:
         // recarga de dominio (borra las suscripciones de delegate, así que se suelta ANTES de
-        // que eso pase) y salida de Play Mode (el juego que la escucha deja de existir).
+        // que eso pase), salida de Play Mode (el juego que la escucha deja de existir), y una
+        // llamada nueva mientras la anterior seguía sin resolver.
         Key? _pendingReleaseKey;
-        EditorApplication.CallbackFunction _pendingTick;
+        Keyboard _keyboard;
+        bool _downQueued;
+        double _releaseAt;
+        float _holdSeconds;
+        TaskCompletionSource<JObject> _pendingTcs;
 
         // Mismo principio para el segundo recurso prestado: mientras dura la simulación, las DOS
         // settings de foco quedan forzadas -- tienen que volver a su valor original en los mismos
@@ -52,7 +72,7 @@ namespace McpUnity.Tools
         public SimulateKeyPressTool()
         {
             Name = "simulate_key_press";
-            Description = "Simulates a keyboard key press-hold-release entirely inside Unity's own Input System (never touches the OS, never needs window focus). Only has an effect in Play Mode. Use to drive gameplay input (e.g. open a UI panel with its bound key) for self-verification via capture_game_view.";
+            Description = "Simulates a keyboard key press-hold-release entirely inside Unity's own Input System (never touches the OS, never needs window focus). Only has an effect in Play Mode. Correctly registers as an edge for WasPressedThisFrame()-gated actions (Dash, menu toggles), not just continuous polling. Use to drive gameplay input for self-verification via capture_game_view or by reading component state.";
             IsAsync = true;
         }
 
@@ -90,81 +110,111 @@ namespace McpUnity.Tools
                 return;
             }
 
-            // Default ~0.15s, no 0: un press+release en el MISMO frame corre el riesgo de que
+            // Default ~0.15s, no 0: un press+release en el MISMO cuadro corre el riesgo de que
             // WasPressedThisFrame() del juego nunca llegue a verlo. Un hold corto pero real
-            // garantiza al menos un frame procesado con la tecla abajo, igual que un toque
+            // garantiza al menos un cuadro procesado con la tecla abajo, igual que un toque
             // humano real (nunca es literalmente instantáneo).
             float holdSeconds = parameters["holdSeconds"]?.ToObject<float?>() ?? 0.15f;
             if (holdSeconds < 0.05f) holdSeconds = 0.05f;
 
-            ForceReleasePending(keyboard); // por si quedó algo sin resolver de una llamada anterior
+            ForceReleasePending(); // por si quedó algo sin resolver de una llamada anterior
 
             BeginInputModeOverride();
 
-            InputSystem.QueueStateEvent(keyboard, new KeyboardState(key));
-            InputSystem.Update();
-            McpLogger.LogInfo($"[MCP Unity] Simulated key down: {key}");
-
+            _keyboard = keyboard;
             _pendingReleaseKey = key;
+            _downQueued = false;
+            _holdSeconds = holdSeconds;
+            _pendingTcs = tcs;
+
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
 
-            double releaseAt = EditorApplication.timeSinceStartup + holdSeconds;
-            _pendingTick = () =>
+            InputSystem.onBeforeUpdate -= OnBeforeInputUpdate;
+            InputSystem.onBeforeUpdate += OnBeforeInputUpdate;
+        }
+
+        /// <summary>
+        /// Corre justo antes de que el Input System procese su propio cuadro (documentado: los
+        /// eventos encolados acá "se sirven directo en el próximo update"). Encolar el flanco de
+        /// bajada desde acá -- en vez de desde delayCall/EditorApplication.update -- es lo que
+        /// sincroniza el "paso" grabado por UpdateWasPressed() con el que WasPressedThisFrame()
+        /// va a comparar momentos después, en el mismo cuadro.
+        /// </summary>
+        void OnBeforeInputUpdate()
+        {
+            if (!_pendingReleaseKey.HasValue)
             {
-                if (EditorApplication.timeSinceStartup < releaseAt) return;
+                InputSystem.onBeforeUpdate -= OnBeforeInputUpdate;
+                return;
+            }
 
-                EditorApplication.update -= _pendingTick;
-                _pendingTick = null;
-                AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
-                EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            if (!_downQueued)
+            {
+                InputSystem.QueueStateEvent(_keyboard, new KeyboardState(_pendingReleaseKey.Value));
+                _downQueued = true;
+                _releaseAt = EditorApplication.timeSinceStartup + _holdSeconds;
+                McpLogger.LogInfo($"[MCP Unity] Simulated key down: {_pendingReleaseKey.Value}");
+                return; // el flanco de bajada y el de subida no pueden ir en el mismo pase
+            }
 
-                bool releasedCleanly = TryReleaseNow(Keyboard.current);
-                _pendingReleaseKey = null;
-                EndInputModeOverride();
+            if (EditorApplication.timeSinceStartup < _releaseAt) return;
 
-                McpLogger.LogInfo($"[MCP Unity] Simulated key up: {key}");
+            FinishRelease(TryReleaseNow(Keyboard.current));
+        }
 
-                tcs.SetResult(new JObject
-                {
-                    ["success"] = true,
-                    ["type"] = "text",
-                    ["message"] = $"Simulated key '{key}' ({holdSeconds:0.00}s hold) via Input System (in-process, no OS input).",
-                    ["key"] = key.ToString(),
-                    ["holdSeconds"] = holdSeconds,
-                    ["releasedCleanly"] = releasedCleanly
-                });
-            };
-            EditorApplication.update += _pendingTick;
+        void FinishRelease(bool releasedCleanly)
+        {
+            InputSystem.onBeforeUpdate -= OnBeforeInputUpdate;
+            AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+
+            Key key = _pendingReleaseKey.Value;
+            float holdSeconds = _holdSeconds;
+            TaskCompletionSource<JObject> tcs = _pendingTcs;
+
+            _pendingReleaseKey = null;
+            _pendingTcs = null;
+            EndInputModeOverride();
+
+            McpLogger.LogInfo($"[MCP Unity] Simulated key up: {key}");
+
+            tcs?.SetResult(new JObject
+            {
+                ["success"] = true,
+                ["type"] = "text",
+                ["message"] = $"Simulated key '{key}' ({holdSeconds:0.00}s hold) via Input System (in-process, no OS input).",
+                ["key"] = key.ToString(),
+                ["holdSeconds"] = holdSeconds,
+                ["releasedCleanly"] = releasedCleanly
+            });
         }
 
         void OnBeforeAssemblyReload()
         {
-            if (_pendingReleaseKey.HasValue) TryReleaseNow(Keyboard.current);
-            EndInputModeOverride();
+            if (_pendingReleaseKey.HasValue) FinishRelease(TryReleaseNow(Keyboard.current));
         }
 
         void OnPlayModeStateChanged(PlayModeStateChange change)
         {
             if (change != PlayModeStateChange.ExitingPlayMode) return;
-            if (_pendingReleaseKey.HasValue) TryReleaseNow(Keyboard.current);
-            EndInputModeOverride();
+            if (_pendingReleaseKey.HasValue) FinishRelease(TryReleaseNow(Keyboard.current));
         }
 
-        void ForceReleasePending(Keyboard keyboard)
+        void ForceReleasePending()
         {
-            if (_pendingTick != null)
-            {
-                EditorApplication.update -= _pendingTick;
-                _pendingTick = null;
-            }
+            InputSystem.onBeforeUpdate -= OnBeforeInputUpdate;
             AssemblyReloadEvents.beforeAssemblyReload -= OnBeforeAssemblyReload;
             EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
 
             if (_pendingReleaseKey.HasValue)
             {
-                TryReleaseNow(keyboard);
+                // No se resuelve el tcs viejo con SetResult -- si quedó uno pendiente de una
+                // llamada anterior sin terminar, no hay forma segura de completarlo bien acá;
+                // se descarta en silencio.
+                TryReleaseNow(Keyboard.current);
                 _pendingReleaseKey = null;
+                _pendingTcs = null;
             }
             EndInputModeOverride();
         }
@@ -191,7 +241,6 @@ namespace McpUnity.Tools
         {
             if (keyboard == null) return false;
             InputSystem.QueueStateEvent(keyboard, new KeyboardState());
-            InputSystem.Update();
             return true;
         }
     }
