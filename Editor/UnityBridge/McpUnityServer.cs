@@ -604,6 +604,10 @@ namespace McpUnity.Unity
             CaptureIsolatedObjectTool captureIsolatedObjectTool = new CaptureIsolatedObjectTool();
             _tools.Add(captureIsolatedObjectTool.Name, captureIsolatedObjectTool);
 
+            // Register Simulated Input Tools
+            SimulateKeyPressTool simulateKeyPressTool = new SimulateKeyPressTool();
+            _tools.Add(simulateKeyPressTool.Name, simulateKeyPressTool);
+
             // Register BatchExecuteTool (must be registered last as it needs access to other tools)
             BatchExecuteTool batchExecuteTool = new BatchExecuteTool(this);
             _tools.Add(batchExecuteTool.Name, batchExecuteTool);
